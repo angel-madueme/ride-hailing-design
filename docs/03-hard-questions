@@ -1,0 +1,194 @@
+# Ride-hailing: the seven hard questions
+
+## 1. Normalisation: where does each fact live?
+Each fact has one home. Everything else points to it with an id.
+
+| Fact | Lives in | Others use |
+|---|---|---|
+| Rider name, phone, email | rider | trip points to rider_id |
+| Driver name, licence | driver | trip points to driver_id |
+| Vehicle plate, make, model | vehicle | trip points to vehicle_id |
+| Which driver owns a vehicle | vehicle.driver_id | nothing repeats it |
+| Which driver a rating is about | trip.driver_id | rating has no driver_id |
+
+### Deliberate copies
+**Copy 1: driver name and vehicle plate on the trip.**
+Written once when the driver accepts (A2) and never updated after.
+Why: a receipt or a dispute must show who drove and in what car as it
+was on the day. If the driver later changes their name or the plate is
+re-registered, old trips must not change.
+Cost: the copy can differ from the current driver row. That is the
+point.
+
+**Copy 2: the fare on the trip.**
+`fare_minor` is calculated when the trip completes (A3) and stored.
+It is not looked up later from any price table.
+Why: prices change. A past trip must always show what was charged (R4).
+
+**Copy 3: amount and currency on the payment.**
+Copied from the trip's fare when the payment is created.
+Why: a payment is a record of money that moved. If a fare is later
+corrected, the payment must still show what was actually charged. The
+database checks that the two agree at creation (see section 6).
+
+## 2. Money
+Every amount is a whole number of kobo, stored as `bigint`, with a
+`currency char(3)` on the same row. Applied to `trip.estimated_fare_minor`,
+`trip.fare_minor` and `payment.amount_minor`.
+- No decimals and no floats. Floats cannot hold 0.1 exactly, so sums drift.
+- The currency column exists even though only NGN is used. Other
+  currencies have a different number of minor units, so a bare number
+  is not enough.
+- Conversion to naira happens only when displaying.
+- Checks: amounts are at least 0 (payments at least 1), and
+  `currency ~ '^[A-Z]{3}$'`.
+
+## 3. Status and state
+
+### Trip
+```mermaid
+stateDiagram-v2
+    [*] --> requested : A1 rider requests
+    requested --> accepted : A2 driver accepts
+    requested --> cancelled : rider cancels
+    accepted --> in_progress : driver starts
+    accepted --> cancelled : rider or driver cancels
+    in_progress --> completed : A3 driver completes
+    completed --> [*]
+    cancelled --> [*]
+```
+
+Allowed moves (five, and nothing else):
+
+| From | To | Action | Who |
+|---|---|---|---|
+| requested | accepted | A2 | driver |
+| requested | cancelled | cancel | rider |
+| accepted | in_progress | start | driver |
+| accepted | cancelled | cancel | rider or driver |
+| in_progress | completed | A3 | driver |
+
+Forbidden moves, and why:
+
+| Move | Why it is forbidden |
+|---|---|
+| in_progress to cancelled | A trip under way cannot be cancelled. If the rider wants out, the driver completes the trip at that point and the fare covers the distance travelled. Cancelling would leave a driver unpaid for work done |
+| accepted to requested | A driver who drops out cancels the trip and the rider requests a new one. Going back would erase the fact that a driver cancelled, and breaks R9 |
+| completed to cancelled | Money is involved. A reversal is a refund on the payment, not a change of trip status |
+| completed to anything, cancelled to anything | Both are final |
+| requested to in_progress, requested to completed, accepted to completed | These skip a step. No driver means no journey |
+
+### What enforces it (three layers)
+1. **Type:** `status` is a Postgres enum, never free text.
+2. **Transition guard:** a `trip_status_transition` table holds the five
+   allowed rows, and a trigger `trip_status_transition_trg` rejects any
+   status change that is not in it. A CHECK cannot compare the old and
+   new value, so a trigger is needed.
+3. **Shape check:** `trip_status_shape_chk` ties each status to the data
+   it needs. For example: requested has no driver, vehicle or fare;
+   accepted and in_progress have a driver and vehicle but no fare;
+   completed has a fare and `completed_at`; cancelled has
+   `cancelled_at` and `cancelled_by`.
+
+The API also changes status with a conditional update, for example
+`UPDATE trip SET status = 'accepted' ... WHERE id = $1 AND status =
+'requested'`. When two drivers accept the same trip at once, only one
+update matches.
+
+### Payment
+| From | To | Meaning |
+|---|---|---|
+| pending | succeeded | the provider confirms |
+| pending | failed | the provider declines |
+| succeeded | refunded | money returned |
+
+Forbidden: failed to succeeded (a retry is a new payment with a new
+idempotency key), refunded to anything, and succeeded back to pending or
+failed. Enforced the same way, with `payment_status_transition_trg`.
+
+## 4. Time
+- Every table has `created_at` and `updated_at`, both `timestamptz` with
+  default `now()`. A trigger `set_updated_at` keeps `updated_at` current,
+  so no application code can forget it.
+- `timestamptz` stores one exact instant. A plain `timestamp` stores a
+  wall-clock reading with no zone, which is the class of bug that made
+  retries run early in the background-jobs task.
+
+| Entity | Delete policy | Why |
+|---|---|---|
+| rider | soft delete (`deleted_at`) | Trips and payments point to the rider and must survive an account closure. An erasure request is met by replacing the name, phone and email and setting `deleted_at` |
+| driver | soft delete | Same reasoning |
+| vehicle | soft delete | A retired car still appears on past trips |
+| trip | never deleted | Records of journeys and money are kept for audit and disputes (R8) |
+| payment | never deleted | Financial records are kept for audit (R8) |
+| rating | never deleted | Immutable. `updated_at` exists for uniformity |
+
+Foreign keys use `ON DELETE RESTRICT`, so a hard delete of a referenced
+row fails.
+Phone, email, licence number and plate are unique **among rows that are
+not deleted**, using partial unique indexes. A closed account does not
+block a new one.
+
+## 5. Identifiers
+Every table uses `id uuid DEFAULT gen_random_uuid()`, generated by the
+database.
+- **Security reason:** sequential integers let anyone count riders and
+  trips, and guess another person's trip URL. Random ids remove the
+  guessing. They are not a lock on their own, so every request still
+  checks that the caller owns the record.
+- **Alternative considered:** time-ordered UUIDs (uuidv7), which keep
+  the index tidier but reveal when a row was created.
+
+## 6. Constraints
+
+| Table | Unique | Foreign keys | Checks |
+|---|---|---|---|
+| rider | phone and email, among non-deleted rows | none | email contains @ |
+| driver | phone, email and licence, among non-deleted rows | none | email contains @ |
+| vehicle | plate among non-deleted rows. `(id, driver_id)` for trip's use | driver_id to driver | year between 1990 and 2100 |
+| trip | `(id, fare_minor, currency)`, `(id, status)`. One active trip per rider. One active trip per driver | rider_id to rider. `(vehicle_id, driver_id)` to vehicle. driver_id to driver | status shape, fares at least 0, currency format, latitude and longitude ranges, pickup differs from drop-off |
+| payment | idempotency_key. provider_reference when present. One succeeded payment per trip | `(trip_id, amount_minor, currency)` to trip | amount at least 1, currency format, a succeeded payment has a provider_reference |
+| rating | one per trip | `(trip_id, trip_status)` to trip | score between 1 and 5, trip_status is completed |
+
+### Which invalid states are now impossible
+
+| Invalid state | Constraint that stops it |
+|---|---|
+| A rider has two active trips (R1) | `trip_one_active_per_rider`: a unique index on rider_id where status is requested, accepted or in_progress |
+| A driver has two active trips (R2) | `trip_one_active_per_driver`: the same on driver_id where status is accepted or in_progress |
+| A trip uses a car that belongs to another driver (R3) | `trip_vehicle_belongs_to_driver_fk`: the pair (vehicle_id, driver_id) must exist in vehicle |
+| A requested trip with a driver, or a completed trip with no fare | `trip_status_shape_chk` |
+| A trip jumps from requested to completed, or goes backwards (R9) | `trip_status_transition_trg` |
+| A payment for an unfinished trip, or with a different amount or currency than the fare (R7) | `payment_matches_trip_fare_fk`. The trip's `fare_minor` is empty until completion, so nothing can match it |
+| Two successful payments for one trip (R7) | `payment_one_success_per_trip`: a unique index on trip_id where status is succeeded |
+| The same payment request charged twice | `payment_idempotency_key_key` |
+| A rating for a trip that is not completed (R6) | `rating_trip_is_completed_fk`: the rating carries `trip_status`, which must be completed and must match the trip |
+| Two ratings for one trip (R6), or a score of 7 | `rating_one_per_trip`, `rating_score_chk` |
+| Deleting a rider who has trips (R8) | the foreign keys use RESTRICT |
+| Two active riders with one phone number | `rider_phone_active_key` |
+
+## 7. Indexes
+Every query behind the five actions, and the index that serves it:
+
+| Query | Index |
+|---|---|
+| A1: does this rider already have an active trip, and show it | `trip_one_active_per_rider` (also the R1 constraint) |
+| A2: list open requests for drivers, oldest first | `trip_open_requests_idx` on `(created_at, id)` where status is requested |
+| A2 and A3: load a trip by id and change its status | the primary key |
+| A3: does this driver already have an active trip | `trip_one_active_per_driver` |
+| A4: find a payment by idempotency key | `payment_idempotency_key_key` |
+| A4: list the payments of a trip | `payment_trip_id_idx` on `(trip_id)` |
+| A5: find the rating of a trip | `rating_one_per_trip` |
+| Rider trip history, newest first, paged | `trip_rider_history_idx` on `(rider_id, created_at DESC, id DESC)` |
+| Driver trip history and a driver's average rating | `trip_driver_history_idx` on `(driver_id, created_at DESC, id DESC)` |
+| List a driver's vehicles | `vehicle_driver_id_idx` on `(driver_id)` |
+
+The id is the final column in each history index so cursor pagination has a stable order when created_at values tie.
+
+Not indexed on purpose: `trip.status` alone (only a few values, so it
+filters badly), `rating.score`, `payment.status` alone, and the
+timestamp columns. Every extra index slows every write.
+
+The two heaviest queries, which get an EXPLAIN in Step 5:
+1. a rider's trip history, newest first, page by page
+2. a driver's average rating, which joins rating to trip

@@ -55,3 +55,5 @@ codes, in-app chat, admin tools, and any user interface.
    amount.
 3. Locations are stored as latitude and longitude, with no address 
    lookup.
+4. Fares are fixed upfront. The final fare equals the estimate calculated 
+   at request, so no client input is involved.
