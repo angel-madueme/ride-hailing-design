@@ -16,8 +16,8 @@ A person who requests and pays for trips.
 |---|---|---|---|
 | id | uuid | yes | primary key |
 | full_name | text | yes | |
-| phone | text | yes | unique |
-| email | text | yes | unique |
+| phone | text | yes | unique among non-deleted rows |
+| email | text | yes | unique among non-deleted rows |
 | created_at | timestamptz | yes | |
 | updated_at | timestamptz | yes | |
 | deleted_at | timestamptz | no | set when the account is closed |
@@ -29,9 +29,9 @@ A person who accepts and completes trips.
 |---|---|---|---|
 | id | uuid | yes | primary key |
 | full_name | text | yes | |
-| phone | text | yes | unique |
-| email | text | yes | unique |
-| licence_number | text | yes | unique |
+| phone | text | yes | unique among non-deleted rows |
+| email | text | yes | unique among non-deleted rows |
+| licence_number | text | yes | unique among non-deleted rows |
 | created_at | timestamptz | yes | |
 | updated_at | timestamptz | yes | |
 | deleted_at | timestamptz | no | set when the account is closed |
@@ -43,7 +43,7 @@ A car registered to one driver.
 |---|---|---|---|
 | id | uuid | yes | primary key |
 | driver_id | uuid | yes | foreign key to driver |
-| plate_number | text | yes | unique |
+| plate_number | text | yes | unique among non-deleted rows |
 | make | text | yes | |
 | model | text | yes | |
 | colour | text | yes | |
@@ -51,6 +51,8 @@ A car registered to one driver.
 | created_at | timestamptz | yes | |
 | updated_at | timestamptz | yes | |
 | deleted_at | timestamptz | no | set when the vehicle is retired |
+
+Also has a unique pair (id, driver_id). Trip uses it to check that a vehicle belongs to the trip's driver.
 
 ## trip
 One journey from pickup to destination. It is the centre of the model.
@@ -60,7 +62,7 @@ One journey from pickup to destination. It is the centre of the model.
 | id | uuid | yes | primary key |
 | rider_id | uuid | yes | foreign key to rider |
 | driver_id | uuid | no | foreign key to driver, empty until accepted |
-| vehicle_id | uuid | no | foreign key to vehicle, empty until accepted |
+| vehicle_id | uuid | no | foreign key to vehicle, together with driver_id as the pair (vehicle_id, driver_id). Empty until accepted |
 | status | trip_status | yes | requested, accepted, in_progress, completed, cancelled. Default requested |
 | pickup_lat, pickup_lng | numeric(9,6) | yes | |
 | dropoff_lat, dropoff_lng | numeric(9,6) | yes | |
@@ -76,13 +78,19 @@ One journey from pickup to destination. It is the centre of the model.
 
 Trips are never deleted (R8), so there is no `deleted_at`.
 
+Unique pairs and checks:
+- unique (id, fare_minor, currency): payment points to this pair, so a payment must match the trip's fare
+- unique (id, status): rating points to this pair, so a rating can only attach to a completed trip
+- one active trip per rider and one active trip per driver (partial unique indexes, see section 6 of docs/03-hard-questions.md)
+- a status shape check that ties each status to the fields it needs
+
 ## payment
 One attempt to charge a rider for a completed trip.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | id | uuid | yes | primary key |
-| trip_id | uuid | yes | foreign key to trip |
+| trip_id | uuid | yes | foreign key to trip as the triple (trip_id, amount_minor, currency) |
 | amount_minor | bigint | yes | |
 | currency | char(3) | yes | |
 | status | payment_status | yes | pending, succeeded, failed, refunded. Default pending |
@@ -100,11 +108,14 @@ A rider's score for a completed trip.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | id | uuid | yes | primary key |
-| trip_id | uuid | yes | foreign key to trip, unique |
+| trip_id | uuid | yes | foreign key to trip as the pair (trip_id, trip_status), unique |
+| trip_status | trip_status | yes | default completed, and must always equal completed |
 | score | smallint | yes | 1 to 5 |
 | comment | text | no | |
 | created_at | timestamptz | yes | |
 | updated_at | timestamptz | yes | |
+
+A rating can only exist for a completed trip because trip_status is fixed to completed and the pair must match a trip row.
 
 ## Relationships
 | Relationship | Cardinality | Meaning |
