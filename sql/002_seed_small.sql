@@ -5,6 +5,8 @@
 --              via UPDATE statements to exercise transition guards and shape checks.
 -- ============================================================================
 
+\set ON_ERROR_STOP on
+
 BEGIN;
 
 -- ============================================================================
