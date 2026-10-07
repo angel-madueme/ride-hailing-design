@@ -90,6 +90,11 @@ Forbidden moves, and why:
    completed has a fare and `completed_at`; cancelled has
    `cancelled_at` and `cancelled_by`.
 
+Two insert guards, `trip_initial_status_trg` and
+`payment_initial_status_trg`, require a new trip to start as `requested`
+and a new payment to start as `pending`. They were added during
+implementation because the transition trigger only fires on updates.
+
 The API also changes status with a conditional update, for example
 `UPDATE trip SET status = 'accepted' ... WHERE id = $1 AND status =
 'requested'`. When two drivers accept the same trip at once, only one
@@ -146,7 +151,7 @@ database.
 | rider | phone and email, among non-deleted rows | none | email contains @ |
 | driver | phone, email and licence, among non-deleted rows | none | email contains @ |
 | vehicle | plate among non-deleted rows. `(id, driver_id)` for trip's use | driver_id to driver | year between 1990 and 2100 |
-| trip | `(id, fare_minor, currency)`, `(id, status)`. One active trip per rider. One active trip per driver | rider_id to rider. `(vehicle_id, driver_id)` to vehicle. driver_id to driver | status shape, fares at least 0, currency format, latitude and longitude ranges, pickup differs from drop-off |
+| trip | `trip_fare_currency_key` `(id, fare_minor, currency)`, `trip_status_key` `(id, status)`. One active trip per rider. One active trip per driver | rider_id to rider. `(vehicle_id, driver_id)` to vehicle. driver_id to driver | status shape, fares at least 0, currency format, latitude and longitude ranges, pickup differs from drop-off |
 | payment | idempotency_key. provider_reference when present. One succeeded payment per trip | `(trip_id, amount_minor, currency)` to trip | amount at least 1, currency format, a succeeded payment has a provider_reference |
 | rating | one per trip | `(trip_id, trip_status)` to trip | score between 1 and 5, trip_status is completed |
 
