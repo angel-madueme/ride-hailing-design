@@ -4,6 +4,9 @@
 --              and history listing (H1), using deterministic fixture IDs from 002.
 --              Each query is commented with its associated action and index.
 -- ============================================================================
+-- Running this file leaves the data unchanged.
+
+BEGIN;
 
 -- ============================================================================
 -- Q1 (Action A1: Request a trip)
@@ -209,3 +212,5 @@ WHERE rider_id = '10000000-0000-0000-0000-000000000001'
   AND (created_at, id) < ('2026-10-06 12:30:00+00'::timestamptz, '40000000-0000-0000-0000-000000000001'::uuid)
 ORDER BY created_at DESC, id DESC
 LIMIT 20;
+
+ROLLBACK;

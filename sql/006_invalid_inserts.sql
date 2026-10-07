@@ -17,6 +17,7 @@
 \echo '======================================================================'
 
 -- 1. Invalid: Rider R1 requests a new trip while T1 is in_progress
+BEGIN;
 INSERT INTO trip (
     id, rider_id, status, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
     estimated_fare_minor, currency, created_at, updated_at
@@ -26,8 +27,11 @@ INSERT INTO trip (
     'requested',
     6.447400, 3.390300, 6.524400, 3.379200, 350000, 'NGN', now(), now()
 );
+ROLLBACK;
 
--- Valid counterpart: Rider R3 (who has no active trip) requests a trip
+-- Valid counterpart: this setup row uses Rider R3, who has no active trip,
+-- to prove that the same insert shape succeeds for an eligible rider. It is
+-- rolled back so it does not become a fixture for later tests.
 BEGIN;
 INSERT INTO trip (
     id, rider_id, status, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
@@ -48,6 +52,7 @@ ROLLBACK;
 \echo '======================================================================'
 
 -- 2. Invalid: Rating a requested trip (T3)
+BEGIN;
 INSERT INTO rating (
     id, trip_id, trip_status, score, comment, created_at, updated_at
 ) VALUES (
@@ -59,6 +64,7 @@ INSERT INTO rating (
     now(),
     now()
 );
+ROLLBACK;
 
 -- Valid counterpart: Rating completed trip T2
 BEGIN;
@@ -83,6 +89,7 @@ ROLLBACK;
 \echo '======================================================================'
 
 -- 3. Invalid: Payment amount (100) does not match trip fare (350000)
+BEGIN;
 INSERT INTO payment (
     id, trip_id, amount_minor, currency, status, provider,
     provider_reference, idempotency_key, created_at, updated_at
@@ -98,6 +105,7 @@ INSERT INTO payment (
     now(),
     now()
 );
+ROLLBACK;
 
 -- Valid counterpart: Payment amount matches trip fare exactly
 BEGIN;
@@ -126,11 +134,13 @@ ROLLBACK;
 \echo '======================================================================'
 
 -- 4. Invalid: in_progress to cancelled
+BEGIN;
 UPDATE trip
 SET status = 'cancelled',
     cancelled_by = 'rider',
     cancelled_at = now()
 WHERE id = '40000000-0000-0000-0000-000000000001';
+ROLLBACK;
 
 -- Valid counterpart: in_progress moves forward to completed
 BEGIN;
@@ -149,9 +159,11 @@ ROLLBACK;
 \echo '======================================================================'
 
 -- 5. Invalid: Vehicle V1 belongs to Driver D1, but T5 driver is Driver D4
+BEGIN;
 UPDATE trip
 SET vehicle_id = '30000000-0000-0000-0000-000000000001'
 WHERE id = '40000000-0000-0000-0000-000000000005';
+ROLLBACK;
 
 -- Valid counterpart: Vehicle V4 belongs to Driver D4
 BEGIN;

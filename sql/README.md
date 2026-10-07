@@ -9,7 +9,7 @@ This directory contains plain PostgreSQL 18 SQL scripts that implement and prove
 
 ## Execution Instructions
 
-Run each SQL script in order from PowerShell or Command Prompt:
+Run each SQL script in this order for a clean evidence run:
 
 ```powershell
 # 0. Reset environment (wipes and recreates clean database objects)
@@ -33,6 +33,27 @@ Run each SQL script in order from PowerShell or Command Prompt:
 # 6. Execute constraint & trigger negative tests and rollback valid counterparts
 & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -p 5433 -d ride_hailing -f sql/006_invalid_inserts.sql
 ```
+
+Scripts `004_queries.sql` and `006_invalid_inserts.sql` roll back every write,
+so either may be rerun after the seed scripts, and running them in either order
+produces the same fixture state.
+
+## Deterministic fixtures used by the evidence scripts
+
+| Fixture | Original state after `002_seed_small.sql` |
+|---|---|
+| R1 (`10000000-0000-0000-0000-000000000001`) | Rider with T1 active; used for the duplicate-active-trip test |
+| T1 (`40000000-0000-0000-0000-000000000001`) | `in_progress`, assigned to D1/V1 |
+| T2 (`40000000-0000-0000-0000-000000000002`) | `completed`, fare `350000 NGN`, no payment or rating |
+| T3 (`40000000-0000-0000-0000-000000000003`) | `requested` |
+| T5 (`40000000-0000-0000-0000-000000000005`) | `accepted`, assigned to D4/V4 |
+| R3 (`10000000-0000-0000-0000-000000000003`) | Rider with no active trip; used for the valid counterpart in test 1 |
+
+For a clean evidence run, reset and recreate the schema, load the small seed,
+load the volume seed, then run `004_queries.sql`, `005_explain.sql`, and
+`006_invalid_inserts.sql`. The query and invalid-insert scripts leave the
+fixtures unchanged, so `004` followed by `006` and `006` followed by `004`
+produce the same test results.
 
 ---
 
