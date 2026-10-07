@@ -1,0 +1,101 @@
+# Ride-hailing: two design analyses
+
+## 1. Over-fetching: REST or GraphQL?
+
+### The endpoint
+`GET /api/v1/trips`, the rider's trip history. Each row on the history screen shows the date, the status, the fare and the driver's name.
+
+### What REST returns
+Every trip in the list is the full Trip object: 16 top-level fields, including both coordinate pairs, five timestamps, the vehicle, `estimatedFareMinor` and `cancelledBy`.
+```json
+{
+  "data": [
+    {
+      "id": "5b0c...", "status": "completed",
+      "pickup": { "lat": 6.4474, "lng": 3.3903 },
+      "dropoff": { "lat": 6.5244, "lng": 3.3792 },
+      "estimatedFareMinor": 350000, "fareMinor": 350000, "currency": "NGN",
+      "driver": { "id": "a1e2...", "name": "Ada O." },
+      "vehicle": { "id": "c9d4...", "plate": "LND-421AA" },
+      "cancelledBy": null,
+      "acceptedAt": "...", "startedAt": "...", "completedAt": "...", "cancelledAt": null,
+      "createdAt": "...", "updatedAt": "..."
+    }
+  ],
+  "meta": { "limit": 20, "hasMore": true, "nextCursor": "..." }
+}
+```
+The screen uses 6 of the 16 fields: `id`, `status`, `createdAt`, `fareMinor`, `currency` and `driver.name`. A full trip is roughly half a kilobyte, so a page of 20 is around 10 KB. This is an estimate, to be measured.
+
+### The same need in GraphQL
+```graphql
+query {
+  myTrips(first: 20) {
+    edges { node { id status createdAt fareMinor currency driver { name } } }
+    pageInfo { endCursor hasNextPage }
+  }
+}
+```
+```json
+{ "data": { "myTrips": {
+    "edges": [ { "node": { "id": "5b0c...", "status": "completed", "createdAt": "...",
+                           "fareMinor": 350000, "currency": "NGN", "driver": { "name": "Ada O." } } } ],
+    "pageInfo": { "endCursor": "...", "hasNextPage": true } } } }
+```
+The client asks for six fields and gets six.
+
+### Decision: stay on REST for now
+- 10 KB with gzip is small, and one screen needs one request.
+- GraphQL adds a schema, resolvers, protection against N+1 queries, limits on query depth and cost, harder caching and a second error model. That is real work before the product has users.
+- Start with REST for an MVP. Add a middle step first if the payload bites: a `fields` parameter such as `?fields=id,status,fareMinor`, or a lighter summary object.
+- **Honest limit:** REST is fine here. It stops being fine when different clients want different slices of the same resource.
+
+### When to switch, and what triggers it
+User count is the wrong trigger, because a million users on one screen shape need no GraphQL. Switch when one of these happens:
+1. A third client type needs a different slice of trips, on top of the rider app and the driver app, for example an operations dashboard, and the `fields` variants on one endpoint pass about five.
+2. One screen needs three or more requests that cannot run in parallel, for example trip, then driver rating, then payment status.
+3. Measured p95 on the list endpoint is over about 50 KB on a mobile network, and `fields` does not fix it.
+
+Add your class notes' exact wording on "REST for an MVP" here. I have not seen them.
+
+## 2. Real-time: a rider watching the driver approach
+
+### The need
+From A2 until the trip ends, the rider's app must show the driver's position and each status change without asking repeatedly.
+
+### The options
+| Option | Verdict |
+|---|---|
+| Polling `GET /trips/:id` every few seconds | Fallback only. Wasteful, and the position lags by a polling interval |
+| WebSockets | A two-way channel. We do not need two-way |
+| Server-Sent Events (SSE) | One-way, server to client. This is what the rider needs |
+
+### The decision: SSE
+The traffic is two separate one-way flows:
+- **Driver to server:** location points, through a plain `POST /trips/:id/location`.
+- **Server to rider:** updates, through SSE.
+
+SSE is ordinary HTTP, reconnects by itself, and passes through proxies and load balancers without special setup. A WebSocket would keep a two-way channel open for a conversation that never happens.
+
+### The endpoint
+`GET /api/v1/trips/:id/events`, caller: the trip's rider. The response is `text/event-stream`.
+
+| Event | Data | When |
+|---|---|---|
+| `trip.snapshot` | the full Trip | sent first on every connect |
+| `trip.updated` | the Trip | each status change |
+| `driver.location` | `{ lat, lng, recordedAt }` | each point from the driver |
+| `trip.closed` | `{ status }` | the trip is completed or cancelled. The server closes the stream |
+
+- A comment line goes out every 20 seconds so idle connections stay open.
+- **Reconnect without replay:** because every connect starts with `trip.snapshot`, a lost event never matters. The client always catches up from the current state.
+- **Fan-out:** the driver's location point is published to a channel keyed by trip id. Every server instance holding that rider's stream subscribes to it.
+- **Errors:** 401, 404 (not the caller's trip), 429 (at most two open streams per caller).
+- **Fallback:** if the stream fails twice, the client polls `GET /trips/:id` every 10 seconds.
+
+### Trade-offs
+- A native browser `EventSource` cannot send an `Authorization` header. Mobile clients can. A web client uses a fetch-based reader or a short-lived stream token.
+- Under HTTP/1.1 a browser allows about six connections per domain. HTTP/2 removes this limit.
+
+### When to move to WebSockets
+When the same channel must carry frequent messages from the rider's side, for example in-app chat or live negotiation. Then a two-way connection earns its cost.
